@@ -7,6 +7,8 @@ I mean it's cool.
 
 Code is open source. Cheers.
 
+https://github.com/QeianTEA/Kettle-updater For updating a Kettle!
+
 ![IMG-20251205-WA0040](https://github.com/user-attachments/assets/29a62ec7-0946-499b-bf3a-0cbc9d399de7)
 ![20251130_222630](https://github.com/user-attachments/assets/dde518e4-37cd-402c-8e06-d81a234459b4)
 ![20251128_012951](https://github.com/user-attachments/assets/12f49f67-040b-484a-b94f-377c8e075dd7)
