@@ -99,7 +99,7 @@ def run(display, buttons):
     # selection screen
     while True:
         display.clear()
-        title = "Minesweeper"
+        title = "Mike Sweeper"
         display.text(title, (SCREEN_W - len(title)*8)//2, 12)
         dname = DIFFICULTIES[diff_index][0]
         display.text("Diff: %s" % dname, 12, 28)
