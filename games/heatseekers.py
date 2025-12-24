@@ -2,8 +2,7 @@
 # HeatSeekers - Pico (128x64)
 # Extended/fixed: miniboss, passerby jets (dive), bullets, powerup storage/use, restart on L_shoulder
 # Performance: fixed-point math kept; death handling/sync fixed; passerby modified to dive.
-# Changes: chain explosions when missiles are removed by an explosion; passerby fire earlier;
-# boss spawns at 45s.
+# Adjustments: boss spawn at 45s & visible; missiles/passerby spawn higher; reliable missile-vs-missile explosions.
 
 import time
 import random
@@ -53,17 +52,14 @@ PASSERBY_CONFIG = {
     'spawn_ms_min': 4000,
     'spawn_ms_max': 9000,
     'speed': 5.5,      # vertical dive speed (px/frame)
-    'missile_delay': 0, # not used now; drop when near
+    'missile_delay': 0,
     'size': (8,3),
     'last_spawn_ms': 0
 }
 
-# how far above the player (in pixels) the passerby fires — increase to make them fire earlier
-PASSERBY_FIRE_OFFSET = 60  # previously ~35, increased to 60 to fire earlier
-
 BOSS_CONFIG = {
-    'appear_after_s': 45.0,           # changed from 100.0 -> 45.0
-    'start_world_y': -160.0,
+    'appear_after_s': 45.0,         # changed: spawn earlier at 45s
+    'start_world_y': -40.0,         # changed: spawn near top of screen (visible)
     'follow_speed': 0.9,
     'dodge_dist': 16.0,
     'hp': 12,
@@ -184,8 +180,9 @@ def spawn_missile(elapsed_s):
                 break
 
     name, pw, ph, speed, maneuver, blink, spawn_weight = MISSILE_TYPES[idx]
+    # spawn higher above so they come into frame
     wx_fp = fp_from_float(player_world_x / FP + random.uniform(-W * 0.6, W * 0.6))
-    wy_fp = fp_from_float(-random.uniform(40.0, 110.0))
+    wy_fp = fp_from_float(-random.uniform(80.0, 160.0))   # raised spawn height
     vx_fp = fp_from_float(random.uniform(-0.6, 0.6))
     vy_fp = fp_from_float(speed)
     missiles.append({
@@ -202,10 +199,10 @@ def spawn_powerup():
     powerups.append({'world_x': wx_fp, 'world_y': wy_fp, 'type': ptype, 'born_ms': now_ms()})
 
 def spawn_passerby():
-    # spawn above, diving downward toward player; small horizontal drift
+    # spawn noticeably higher, so they dive into view
     wx_fp = fp_from_float(player_world_x / FP + random.uniform(-W * 0.6, W * 0.6))
-    wy_fp = fp_from_float(-random.uniform(160.0, 80.0))
-    vx_fp = fp_from_float(random.uniform(-0.8, 0.8))  # slight horizontal drift
+    wy_fp = fp_from_float(-random.uniform(220.0, 120.0))  # spawn higher than before
+    vx_fp = fp_from_float(random.uniform(-0.8, 0.8))
     vy_fp = fp_from_float(PASSERBY_CONFIG['speed'])
     pw, ph = PASSERBY_CONFIG['size']
     passerby.append({
@@ -240,12 +237,6 @@ def spawn_boss_rocket(bx_fp, by_fp, target_x_fp):
     })
 
 def create_explosion_at_world(wx_fp_or_f, wy_fp_or_f, now_ts, size=5, vy=None):
-    """
-    Create an explosion and also remove overlapping missiles.
-    If missiles are removed by this explosion, spawn small explosions at their positions
-    to create visible chain-reaction (fixes rockets disappearing silently).
-    """
-    # accept either fixed-point ints or floats
     if isinstance(wx_fp_or_f, int):
         wx_fp = wx_fp_or_f
     else:
@@ -258,11 +249,7 @@ def create_explosion_at_world(wx_fp_or_f, wy_fp_or_f, now_ts, size=5, vy=None):
         vy_fp = fp_from_float(1.5)
     else:
         vy_fp = fp_from_float(vy)
-
-    # add the original explosion
     explosions.append({'wx': float(wx_fp), 'wy': float(wy_fp), 'vy': float(vy_fp), 'born': now_ts, 'size': int(size)})
-
-    # remove overlapping missiles and create small explosions at their locations (chain reaction)
     ex_left_px = world_to_screen_x(int(wx_fp), player_world_x) - (size // 2)
     ex_top_px  = world_to_screen_y(int(wy_fp)) - (size // 2)
     ex_w = size; ex_h = size
@@ -272,25 +259,8 @@ def create_explosion_at_world(wx_fp_or_f, wy_fp_or_f, now_ts, size=5, vy=None):
         my_px = world_to_screen_y(int(m['world_y']))
         if rects_overlap(ex_left_px, ex_top_px, ex_w, ex_h, mx_px, my_px, m['pw'], m['ph']):
             rm.append(m)
-
-    # remove missiles and spawn secondary explosions for each removed missile
     for m in rm:
-        # pick a size based on missile type (bigger for boss rockets)
-        sec_size = 5
-        if m.get('type', '').startswith('boss_'):
-            sec_size = 8
-        elif m.get('type', '') == 'p_missile':
-            sec_size = 6
-        # spawn a small explosion at the missile position (convert fixed-point to stored float in explosions)
-        explosions.append({
-            'wx': float(int(m['world_x'])),
-            'wy': float(int(m['world_y'])),
-            'vy': float(vy_fp),
-            'born': now_ts,
-            'size': int(sec_size)
-        })
-        if m in missiles:
-            missiles.remove(m)
+        if m in missiles: missiles.remove(m)
 
 def _show_splash_image_or_text(display, buttons):
     try:
@@ -351,8 +321,6 @@ def draw_powerup_icon(display, ptype):
 def run(display, buttons):
     """
     Outer session loop allows immediate restart without re-showing splash.
-    Call as run(display, buttons) normally. Restart from CRASHED uses same function
-    but skips the splash so the player returns to play immediately.
     """
     global player_world_x, player_lat_vel, last_spawn_ms, start_ms, last_powerup_ms, next_powerup_ms, invuln_until
     global missiles, powerups, explosions, passerby, boss, boss_active, bullets
@@ -366,12 +334,10 @@ def run(display, buttons):
     # session loop
     skip_splash = False
     while True:
-        # Splash unless skip_splash requested (restart)
         if not skip_splash:
             _show_splash_image_or_text(display, buttons)
-        skip_splash = False  # reset per-session (only set to True on immediate-restart)
+        skip_splash = False
 
-        # initialize/reset game state for the session
         missiles.clear(); powerups.clear(); explosions.clear(); passerby.clear(); bullets.clear()
         player_world_x = fp_from_float(0.0)
         player_lat_vel = 0
@@ -394,7 +360,6 @@ def run(display, buttons):
         boss_active = False
         PASSERBY_CONFIG['last_spawn_ms'] = now_ms()
 
-        # main loop for a single session
         while True:
             now = now_ms()
             elapsed_s = (now - start_ms) / 1000.0
@@ -404,11 +369,8 @@ def run(display, buttons):
                 spawn_boss()
 
             if exploding:
-                # When exploding is True we skip the main updates.
-                # Immediately jump into the death-wait/render path to avoid further updates.
                 pass
             else:
-                # --- simulation update block ---
                 steering_left = (pin_left.value() == 0) or (pin_sh_l.value() == 0)
                 steering_right = (pin_right.value() == 0) or (pin_sh_r.value() == 0)
 
@@ -466,13 +428,13 @@ def run(display, buttons):
                 for m in to_remove:
                     if m in missiles: missiles.remove(m)
 
-                # update passerby: dive downward (vy) and drop missile earlier using PASSERBY_FIRE_OFFSET
+                # update passerby: dive downward (vy) and drop missile earlier (higher threshold)
                 for p in list(passerby):
                     p['world_x'] += int(p['vx'])
                     p['world_y'] += int(p['vy'])
                     p_sy = world_to_screen_y(int(p['world_y']))
-                    # FIRE earlier: threshold uses PASSERBY_FIRE_OFFSET
-                    if (not p['fired']) and p_sy >= PY - PASSERBY_FIRE_OFFSET:
+                    # drop earlier: threshold moved up
+                    if (not p['fired']) and p_sy >= PY - 50:
                         mx_fp = int(p['world_x'])
                         my_fp = int(p['world_y']) + fp_from_float(4.0)
                         target_x_fp = int(player_world_x)
@@ -486,7 +448,7 @@ def run(display, buttons):
                     if abs(p['world_x'] - player_world_x) > fp_from_float(W * 2.0):
                         if p in passerby: passerby.remove(p)
 
-                # update boss (unchanged logic, fixed-point)
+                # update boss
                 if boss_active and boss:
                     dx_fp = player_world_x - boss['world_x']
                     boss['vx'] = int(dx_fp * 0.02 * BOSS_CONFIG['follow_speed'])
@@ -536,10 +498,10 @@ def run(display, buttons):
                         mx_px = world_to_screen_x(int(m['world_x']), player_world_x)
                         my_px = world_to_screen_y(int(m['world_y']))
                         if rects_overlap(bx_px, by_px, b['pw'], b['ph'], mx_px, my_px, m['pw'], m['ph']):
-                            # remove missile and create explosion
                             if m in missiles: missiles.remove(m)
                             if b in bullets: bullets.remove(b)
                             removed_b = True
+                            # explosion at missile world coords
                             create_explosion_at_world(int(m['world_x']), int(m['world_y']), now, size=5, vy=None)
                             break
                     if removed_b: continue
@@ -565,22 +527,26 @@ def run(display, buttons):
                                 missiles[:] = []; passerby[:] = []
                                 boss_active = False; boss = None
                                 display.clear(); display.text("VICTORY", 36, 20); display.show(); time.sleep(2.0);
-                                # after victory return to main menu
                                 skip_splash = False
                                 break
 
-                # missile vs missile collisions
+                # missile vs missile collisions (now use world coords to place explosion reliably)
                 msnap = list(missiles)
                 for i, a in enumerate(msnap):
                     if a not in missiles: continue
-                    ax_px = world_to_screen_x(int(a['world_x']), player_world_x); ay_px = world_to_screen_y(int(a['world_y']))
                     for b2 in msnap[i+1:]:
                         if b2 not in missiles: continue
-                        bx_px = world_to_screen_x(int(b2['world_x']), player_world_x); by_px = world_to_screen_y(int(b2['world_y']))
+                        ax_fp = int(a['world_x']); ay_fp = int(a['world_y'])
+                        bx_fp = int(b2['world_x']); by_fp = int(b2['world_y'])
+                        # compute screen pixels for overlap check (same as before)
+                        ax_px = world_to_screen_x(ax_fp, player_world_x); ay_px = world_to_screen_y(ay_fp)
+                        bx_px = world_to_screen_x(bx_fp, player_world_x); by_px = world_to_screen_y(by_fp)
                         if rects_overlap(ax_px, ay_px, a['pw'], a['ph'], bx_px, by_px, b2['pw'], b2['ph']):
-                            center_x = (ax_px + bx_px) / 2.0
-                            center_y = (ay_px + by_px) / 2.0
-                            create_explosion_at_world(fp_from_float(center_x), fp_from_float(center_y), now, size=5, vy=None)
+                            # center in world fixed-point (integer)
+                            center_wx = (ax_fp + bx_fp) // 2
+                            center_wy = (ay_fp + by_fp) // 2
+                            # create explosion at world center (guaranteed correct position)
+                            create_explosion_at_world(center_wx, center_wy, now, size=5, vy=None)
                             if a in missiles: missiles.remove(a)
                             if b2 in missiles: missiles.remove(b2)
 
@@ -630,26 +596,13 @@ def run(display, buttons):
                             my_px = world_to_screen_y(int(m['world_y']))
                             if rects_overlap(ex_left, ex_top, ex['size'], ex['size'], mx_px, my_px, m['pw'], m['ph']):
                                 rm.append(m)
-                        # remove and chain-explode (create_explosion_at_world also handled chain explosions,
-                        # but ensure here we remove and produce visuals as well)
                         for m in rm:
-                            if m in missiles:
-                                # spawn a small explosion visually at missile location (to ensure visible effect)
-                                explosions.append({
-                                    'wx': float(int(m['world_x'])),
-                                    'wy': float(int(m['world_y'])),
-                                    'vy': float(ex.get('vy', 1.5)),
-                                    'born': now,
-                                    'size': 5 if not m.get('type','').startswith('boss_') else 8
-                                })
-                                missiles.remove(m)
+                            if m in missiles: missiles.remove(m)
 
             # If we just entered exploding state, handle death sequence now (freeze simulation and show crash after timer)
             if exploding:
-                # Wait until explosion_end_ms while drawing the current frame/ explosions to the screen
                 while now_ms() < explosion_end_ms:
                     display.clear()
-                    # draw explosions (still visible)
                     ex_blink_phase = ((now_ms() // 300) & 1)
                     for ex in list(explosions):
                         age = now_ms() - ex['born']
@@ -659,17 +612,14 @@ def run(display, buttons):
                             if ex_blink_phase:
                                 display.fill_rect(int(sx), int(sy), ex['size'], ex['size'], 1)
                     display.show()
-                    # consume inputs but ignore CONFIRM/use while exploding
                     _ = buttons.get_event()
                     time.sleep_ms(30)
-                # explosion finished; show crashed screen
                 total_s = int((explosion_end_ms - start_ms) / 1000.0)
                 display.clear()
                 display.text("CRASHED", 28, 12)
                 display.text("T:%03d s" % (total_s), 40, 28)
                 display.text("Press L to restart", 4, 46)
                 display.show()
-                # WAIT for restart (L_shoulder) or CONFIRM to exit to menu
                 while True:
                     ev_local = None
                     if pin_sh_l.value() == 0:
@@ -677,14 +627,11 @@ def run(display, buttons):
                     else:
                         ev_local = buttons.get_event()
                     if ev_local == 'RESTART' or ev_local == 'SHOULDER_L':
-                        # immediate restart: set skip_splash True and break to outer loop
                         skip_splash = True
                         break
                     if ev_local == 'CONFIRM':
-                        # return to menu
                         return
                     time.sleep_ms(60)
-                # break session loop to start a new one (outer while continues)
                 break
 
             # ---------- RENDER ----------
@@ -773,7 +720,7 @@ def run(display, buttons):
 
             display.show()
 
-            # CONFIRM usage: blocked during exploding to avoid race
+            # CONFIRM usage
             ev = buttons.get_event()
             if ev == 'CONFIRM' and not exploding:
                 if now < shoot_until:
@@ -792,4 +739,5 @@ def run(display, buttons):
 
             time.sleep_ms(28)
 
-        # outer session loop continues: if skip_splash True it will start next session immediately
+        # outer session continues; if skip_splash True next session starts immediately
+
