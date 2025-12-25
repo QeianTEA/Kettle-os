@@ -81,7 +81,7 @@ def main():
         {'name': "Volfied", 'module': volfied},
         {'name': "Heat Seekers", 'module': heatseekers},
         {'name': "Mike Sweeper", 'module': minesweeper},
-        {'name': 'Chepp', 'module': chess}
+        {'name': 'Chepp', 'module': chess},
         {'name': "Data Hop", 'module': datahop},
         {'name': "Mike", 'module': None}    # to be added later
     ]

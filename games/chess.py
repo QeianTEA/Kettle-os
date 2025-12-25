@@ -1,22 +1,17 @@
 # games/chess/chess.py
-# Minimal chess for 128x64 OLED; tile=8px -> board is 64x64; HUD on right
+# Fixed & optimized chess for Pico (tile=8px). Proper dark-square visibility, cursor clearing, and input flush.
 # Controls:
 #  - UP/DOWN/LEFT/RIGHT move selector
-#  - SHOULDER_RIGHT (or CONFIRM) to pick / place
-#  - SHOULDER_LEFT to cancel selection OR (when on menu) cycle difficulty
-#  - CONFIRM from menu enters the press-to-play screen
-#
-# Simple AI: Easy=random, Normal=minimax depth2, Hard=minimax depth3
-#
-# Note: no castling, no en-passant. Pawn promote -> Queen.
+#  - SHOULDER_RIGHT or CONFIRM to pick/place
+#  - SHOULDER_LEFT to cancel selection (or cycle difficulty on pre-play)
+# Note: small engine, no castling/en-passant. Pawn -> Queen on promotion.
 
 import time
 import random
-import copy
 
 GAME = {'name': 'Chepp'}
 
-# display layout
+# layout
 TILE = 8
 BOARD_SIZE = 8
 BOARD_PIX = TILE * BOARD_SIZE  # 64
@@ -26,12 +21,12 @@ HUD_W = 128 - HUD_X
 # piece values for evaluation
 VAL = {'P':100, 'N':320, 'B':330, 'R':500, 'Q':900, 'K':20000}
 
-# difficulties
 DIFFICULTIES = ['Easy', 'Normal', 'Hard']
-# minimax depths for diffs
 DEPTH_FOR = {'Easy': 1, 'Normal': 2, 'Hard': 3}
 
-# helper: initial board (white uppercase, black lowercase)
+# ---------------------------
+# Engine (unchanged)
+# ---------------------------
 def initial_board():
     return [
         list("rnbqkbnr"),
@@ -44,26 +39,15 @@ def initial_board():
         list("RNBQKBNR"),
     ]
 
-# ---------------------------
-# Board utilities & moves
-# ---------------------------
 def in_bounds(x,y):
     return 0 <= x < 8 and 0 <= y < 8
-
-def is_white(piece):
-    return piece.isupper()
-
-def is_black(piece):
-    return piece.islower()
-
+def is_white(piece): return piece.isupper()
+def is_black(piece): return piece.islower()
 def piece_color(piece):
     if piece == '.': return None
     return 'white' if piece.isupper() else 'black'
+def clone_board(b): return [row[:] for row in b]
 
-def clone_board(b):
-    return [row[:] for row in b]
-
-# find king pos
 def find_king(b, color):
     target = 'K' if color=='white' else 'k'
     for y in range(8):
@@ -72,7 +56,6 @@ def find_king(b, color):
                 return x,y
     return None
 
-# generate pseudo-legal moves (we'll filter for king-safety later)
 def gen_moves(b, for_color):
     moves = []
     for y in range(8):
@@ -87,28 +70,25 @@ def gen_moves(b, for_color):
 def gen_piece_moves(b, x, y, p):
     moves = []
     p_low = p.lower()
-    if p_low == 'p': # pawn
+    if p_low == 'p':
         dir = -1 if is_white(p) else 1
         start_row = 6 if is_white(p) else 1
-        # forward
         nx, ny = x, y + dir
         if in_bounds(nx, ny) and b[ny][nx] == '.':
             moves.append(((x,y),(nx,ny)))
-            # two-step
             nx2, ny2 = x, y + dir*2
             if y == start_row and b[ny2][nx2] == '.':
                 moves.append(((x,y),(nx2,ny2)))
-        # captures
         for dx in (-1,1):
             cx, cy = x+dx, y+dir
             if in_bounds(cx, cy) and b[cy][cx] != '.' and piece_color(b[cy][cx]) != piece_color(p):
                 moves.append(((x,y),(cx,cy)))
-    elif p_low == 'n': # knight
+    elif p_low == 'n':
         for dx,dy in ((1,2),(2,1),(2,-1),(1,-2),(-1,-2),(-2,-1),(-2,1),(-1,2)):
             nx, ny = x+dx, y+dy
             if in_bounds(nx, ny) and (b[ny][nx]=='.' or piece_color(b[ny][nx])!=piece_color(p)):
                 moves.append(((x,y),(nx,ny)))
-    elif p_low == 'b' or p_low == 'r' or p_low == 'q':
+    elif p_low in ('b','r','q'):
         directions = []
         if p_low in ('b','q'):
             directions += [(1,1),(1,-1),(-1,1),(-1,-1)]
@@ -133,34 +113,29 @@ def gen_piece_moves(b, x, y, p):
                     moves.append(((x,y),(nx,ny)))
     return moves
 
-# apply a move (also handle pawn promotion to Q)
 def make_move(b, mv):
     (x1,y1),(x2,y2) = mv
     b2 = clone_board(b)
     p = b2[y1][x1]
     b2[y1][x1] = '.'
-    # promotion check: pawn reaches end
     if p.lower()=='p' and (y2==0 or y2==7):
         b2[y2][x2] = 'Q' if is_white(p) else 'q'
     else:
         b2[y2][x2] = p
     return b2
 
-# is king in check?
 def in_check(b, color):
     kpos = find_king(b, color)
     if not kpos:
         return True
     kx, ky = kpos
     enemy = 'black' if color=='white' else 'white'
-    # generate all enemy moves and see if one captures king
     for mv in gen_moves(b, enemy):
         (sx,sy),(tx,ty) = mv
         if tx==kx and ty==ky:
             return True
     return False
 
-# list legal moves for color
 def legal_moves(b, color):
     moves = gen_moves(b, color)
     leg = []
@@ -170,7 +145,6 @@ def legal_moves(b, color):
             leg.append(mv)
     return leg
 
-# basic material evaluation
 def eval_board(b):
     s = 0
     for y in range(8):
@@ -180,19 +154,14 @@ def eval_board(b):
                 s += VAL.get(p.upper(),0) * (1 if is_white(p) else -1)
     return s
 
-# minimax with alpha-beta, returns (score, move)
 def minimax(b, depth, color, alpha, beta):
-    # terminal or depth
     if depth==0:
         return eval_board(b), None
     moves = legal_moves(b, color)
     if not moves:
-        # no legal moves: checkmate or stalemate
         if in_check(b, color):
-            # checkmate
             return (-999999 if color=='white' else 999999), None
         else:
-            # stalemate
             return 0, None
     best_mv = None
     if color=='white':
@@ -219,192 +188,298 @@ def minimax(b, depth, color, alpha, beta):
         return minv, best_mv
 
 # ---------------------------
-# Rendering / UI helpers
+# Drawing helpers & icons
 # ---------------------------
-def draw_board(display, board, selx, sely, show_moves):
-    # board origin at (0,0)
-    # draw squares
+def draw_piece_icon(display, piece, tx, ty, draw_on_dark):
+    """
+    Draw small icon inside tile. draw_on_dark=True -> draw inverted (clear pixels) so it contrasts.
+    tx,ty are top-left pixel coords of tile.
+    """
+    x = tx + 1
+    y = ty + 1
+    fr = display.fill_rect
+    # color convention: 1=set pixel, 0=clear pixel
+    set_color = 1 if not draw_on_dark else 0
+
+    p = piece.lower()
+    if p == 'p':
+        fr(x+2, y+1, 2, 2, set_color)
+        fr(x+2, y+3, 2, 1, set_color)
+    elif p == 'r':
+        fr(x, y+1, 4, 1, set_color)
+        fr(x, y+2, 4, 1, set_color)
+        fr(x, y+3, 4, 1, set_color)
+        # frame: outline - draw with set_color (works as border)
+        try:
+            display.rect(x, y, 4, 4, set_color)
+        except TypeError:
+            pass
+    elif p == 'n':
+        fr(x+2, y, 2, 1, set_color)
+        fr(x+1, y+1, 2, 1, set_color)
+        fr(x+1, y+2, 1, 2, set_color)
+    elif p == 'b':
+        fr(x+1, y, 1, 1, set_color)
+        fr(x+2, y+1, 1, 1, set_color)
+        fr(x+3, y+2, 1, 1, set_color)
+        fr(x+1, y+3, 3, 1, set_color)
+    elif p == 'q':
+        fr(x, y+1, 1, 1, set_color)
+        fr(x+2, y, 1, 1, set_color)
+        fr(x+4, y+1, 1, 1, set_color)
+        fr(x+1, y+3, 3, 1, set_color)
+    elif p == 'k':
+        fr(x+2, y, 1, 2, set_color)
+        fr(x+1, y+1, 3, 1, set_color)
+        fr(x+1, y+3, 3, 1, set_color)
+    else:
+        fr(x+1, y+1, 2, 2, set_color)
+
+def draw_board_background(display):
+    """Draw static board squares once."""
     for r in range(BOARD_SIZE):
         for c in range(BOARD_SIZE):
-            x = c*TILE
-            y = r*TILE
-            # alternate fill for board squares: simple pattern
-            if (r + c) % 2 == 0:
-                # light: leave empty
-                pass
+            x = c * TILE
+            y = r * TILE
+            if (r + c) % 2 == 1:
+                display.fill_rect(x, y, TILE, TILE, 1)
             else:
-                # dark: fill small rect
-                display.fill_rect(x+0, y+0, TILE, TILE)
-            # piece
-            p = board[r][c]
-            if p != '.':
-                # draw piece letter centered-ish
-                # font 8px wide -> fits into 8x8 tile
-                display.text(p, x+1, y)  # slight offset
-    # show selection box
-    sx = selx * TILE
-    sy = sely * TILE
-    display.rect(sx, sy, TILE, TILE)
+                display.fill_rect(x, y, TILE, TILE, 0)
 
-    # show legal moves hints if provided as list of coords
-    if show_moves:
-        for (tx,ty) in show_moves:
-            px = tx * TILE + (TILE//2)-1
-            py = ty * TILE + (TILE//2)-1
-            # small dot
-            display.fill_rect(px, py, 2, 2)
+# redraw a tile fully (background, piece, move hint, and selection border if needed)
+def redraw_tile(display, board, r, c, show_moves_set, sel_now, sel_prev):
+    tx = c * TILE
+    ty = r * TILE
+    dark = ((r + c) % 2 == 1)
+    # background
+    display.fill_rect(tx, ty, TILE, TILE, 1 if dark else 0)
+    # piece
+    p = board[r][c]
+    if p != '.':
+        # draw inverted on dark squares, normal on light
+        draw_piece_icon(display, p, tx, ty, draw_on_dark=dark)
+    # move hint
+    if (c,r) in show_moves_set:
+        cx = tx + TILE//2 - 1
+        cy = ty + TILE//2 - 1
+        display.fill_rect(cx, cy, 2, 2, 1 if not dark else 0)
+    # selection border
+    now_sel = (sel_now is not None and sel_now[0]==c and sel_now[1]==r)
+    prev_sel = (sel_prev is not None and sel_prev[0]==c and sel_prev[1]==r)
+    if now_sel:
+        # invert-ish border: thicker corners on dark tiles, clear border on dark, drawn border on light
+        if dark:
+            # clear an inner 4x4 area to create visible "hole" (corners more thick)
+            display.fill_rect(tx+1, ty+1, TILE-2, 1, 0)
+            display.fill_rect(tx+1, ty+2, 1, TILE-4, 0)
+            display.fill_rect(tx+TILE-2, ty+2, 1, TILE-4, 0)
+            display.fill_rect(tx+1, ty+TILE-2, TILE-2, 1, 0)
+        else:
+            # draw border
+            try:
+                display.rect(tx, ty, TILE, TILE, 1)
+                # make corners a bit thicker
+                display.fill_rect(tx, ty, 2, 2, 1)
+                display.fill_rect(tx+TILE-2, ty, 2, 2, 1)
+                display.fill_rect(tx, ty+TILE-2, 2, 2, 1)
+                display.fill_rect(tx+TILE-2, ty+TILE-2, 2, 2, 1)
+            except Exception:
+                pass
+    elif prev_sel:
+        # previously selected — nothing extra to draw because we already redrew background + piece above
+        pass
 
-def draw_hud(display, title, difficulty, turn):
-    # clear HUD area (right side)
+# simple HUD draw; always cleared before writing
+def draw_hud(display, title, diff, turn, hint):
     display.fill_rect(HUD_X, 0, HUD_W, 64, 0)
-    # show title/difficulty/turn
     display.text(title, HUD_X+2, 2)
-    display.text("Diff:" + difficulty, HUD_X+2, 14)
+    display.text("Diff:" + diff, HUD_X+2, 14)
     display.text("Turn:" + ("W" if turn=='white' else "B"), HUD_X+2, 26)
-    display.text("R=Play", HUD_X+2, 40)
-    display.text("L=Cancel", HUD_X+2, 50)
+    if hint:
+        display.text(hint, HUD_X+2, 40)
 
 # ---------------------------
-# Game flow
+# Main loop with fixes
 # ---------------------------
 def run(display, buttons):
-    # difficulty state - default medium
-    diff_index = 1  # Normal
-    # show press-to-play screen where RIGHT cycles difficulty
-    # but when the chess tile is selected in hub, LEFT cycles difficulty (this module also supports LEFT cycling)
-    # We'll implement both: menu will call run(), so here we present a small pre-play screen.
-    chosen = False
+    # pre-play (select difficulty)
+    diff_index = 1
     while True:
         display.clear()
         display.text("Chess", 8, 20)
         display.text("Diff: " + DIFFICULTIES[diff_index], 8, 34)
-        display.text("Press R to play", 8, 48)
+        display.text("Press CONF to play", 8, 48)
         display.show()
         ev = buttons.get_event()
         if ev == 'SHOULDER_RIGHT':
-            # cycle difficulty (explicit request)
             diff_index = (diff_index + 1) % len(DIFFICULTIES)
-        if ev == 'SHOULDER_LEFT':
+        elif ev == 'SHOULDER_LEFT':
             diff_index = (diff_index - 1) % len(DIFFICULTIES)
-        if ev == 'CONFIRM' or ev == 'SHOULDER_RIGHT' and ev is not None:
-            # If CONFIRM or shoulder_right pressed as play, but we must ensure we don't interpret diff-change as play
-            # Here: pressing CONFIRM will play; pressing SHOULDER_RIGHT cycles diff; pressing CONFIRM after is real play.
-            # To reduce ambiguity, require CONFIRM to actually start. But user wanted SHOULDER_RIGHT to cycle difficulty
-            # when on press-to-play; we'll require CONFIRM to start.
-            if ev == 'CONFIRM':
-                break
+        elif ev == 'CONFIRM':
+            break
         time.sleep_ms(80)
 
-    difficulty = DIFFICULTIES[diff_index]
-    depth = DEPTH_FOR[difficulty]
+    # Important: flush any residual button events so we don't auto-select from previous presses
+    for _ in range(6):
+        buttons.get_event()
+        time.sleep_ms(30)
 
-    # initialize game
+    difficulty = DIFFICULTIES[diff_index]
+
+    # init game state
     board = initial_board()
     turn = 'white'
-    selx, sely = 0, 7  # selector starts at bottom-left
+    selx, sely = 0, 7
     selecting = False
     selected_sq = None
+    prev_sel = None
 
+    # static draw once
+    draw_board_background(display)
+    display.show()
+
+    # initial full draw
+    show_moves_set = set()
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            redraw_tile(display, board, r, c, show_moves_set, (selx,sely), None)
+    draw_hud(display, "Chess", difficulty, turn, "")
+    display.show()
+
+    prev_board_snapshot = clone_board(board)
+
+    # main loop - respond only to input changes (dirty redraw)
     while True:
-        # render
-        display.clear()
-        # compute legal moves for highlighting (if in selecting mode)
-        show_moves = []
-        if selecting and selected_sq:
-            sx, sy = selected_sq
-            # get moves from this piece
-            moves = gen_piece_moves(board, sx, sy, board[sy][sx])
-            # filter legal
-            legal = []
-            for mv in moves:
-                b2 = make_move(board, mv)
-                if not in_check(b2, turn):
-                    legal.append(mv[1])
-            show_moves = legal
+        ev = buttons.get_event()
+        dirty_tiles = set()
+        hud_hint = ""
 
-        draw_board(display, board, selx, sely, show_moves)
-        draw_hud(display, "Chess", difficulty, turn)
-        display.show()
+        if ev == 'LEFT':
+            prev_sel = (selx, sely)
+            selx = max(0, selx-1)
+            dirty_tiles.add(prev_sel); dirty_tiles.add((selx,sely))
+        elif ev == 'RIGHT':
+            prev_sel = (selx, sely)
+            selx = min(7, selx+1)
+            dirty_tiles.add(prev_sel); dirty_tiles.add((selx,sely))
+        elif ev == 'UP':
+            prev_sel = (selx, sely)
+            sely = max(0, sely-1)
+            dirty_tiles.add(prev_sel); dirty_tiles.add((selx,sely))
+        elif ev == 'DOWN':
+            prev_sel = (selx, sely)
+            sely = min(7, sely+1)
+            dirty_tiles.add(prev_sel); dirty_tiles.add((selx,sely))
+        elif ev == 'SHOULDER_LEFT':
+            selecting = False
+            selected_sq = None
+            # redraw current selection tile to remove selection
+            dirty_tiles.add((selx,sely))
+        elif ev == 'SHOULDER_RIGHT' or ev == 'CONFIRM':
+            if not selecting:
+                p = board[sely][selx]
+                if p != '.' and ((turn=='white' and is_white(p)) or (turn=='black' and is_black(p))):
+                    selecting = True
+                    selected_sq = (selx, sely)
+                    # redraw selected tile to show selection
+                    dirty_tiles.add((selx,sely))
+                else:
+                    hud_hint = "Invalid"
+            else:
+                mv = (selected_sq, (selx, sely))
+                legal = legal_moves(board, turn)
+                if mv in legal:
+                    # remember source/dest to redraw after move
+                    sx, sy = selected_sq
+                    dx, dy = selx, sely
+                    board = make_move(board, mv)
+                    selecting = False
+                    selected_sq = None
+                    dirty_tiles.add((sx,sy)); dirty_tiles.add((dx,dy))
+                    prev_board_snapshot = None  # force snapshot refresh
+                    # change turn
+                    turn = 'black' if turn=='white' else 'white'
+                    # AI move if black
+                    if turn == 'black':
+                        hud_hint = "Thinking..."
+                        draw_hud(display, "Chess", difficulty, turn, hud_hint)
+                        display.show()
+                        # small think
+                        if difficulty == 'Easy':
+                            moves = legal_moves(board, turn)
+                            if moves:
+                                board = make_move(board, random.choice(moves))
+                        else:
+                            val,mv = minimax(board, DEPTH_FOR[difficulty], turn, -10**9, 10**9)
+                            if mv:
+                                board = make_move(board, mv)
+                        # after AI move
+                        turn = 'white'
+                        # mark full board dirty (since pieces moved by AI unpredictably)
+                        for r in range(BOARD_SIZE):
+                            for c in range(BOARD_SIZE):
+                                dirty_tiles.add((c,r))
+                else:
+                    selecting = False
+                    selected_sq = None
+                    hud_hint = "Bad move"
 
-        # check for checkmate/stalemate
+        # check endgame
         leg = legal_moves(board, turn)
         if not leg:
-            # terminal
             if in_check(board, turn):
-                # checkmate
-                display.clear()
-                display.text("Checkmate", 10, 24)
-                display.text(("White wins" if turn=='black' else "Black wins"), 10, 36)
-                display.show()
+                display.clear(); display.text("Checkmate", 10, 24); display.show()
             else:
-                display.clear()
-                display.text("Stalemate", 10, 24)
-                display.show()
-            # wait for CONFIRM to exit to menu
+                display.clear(); display.text("Stalemate", 10, 24); display.show()
             while True:
                 if buttons.get_event() == 'CONFIRM':
                     return
                 time.sleep_ms(80)
 
-        # input handling (selector move)
-        ev = buttons.get_event()
-        if ev == 'LEFT':
-            selx = max(0, selx-1)
-        elif ev == 'RIGHT':
-            selx = min(7, selx+1)
-        elif ev == 'UP':
-            sely = max(0, sely-1)
-        elif ev == 'DOWN':
-            sely = min(7, sely+1)
-        elif ev == 'SHOULDER_LEFT':
-            # cancel selection
-            selecting = False
-            selected_sq = None
-        elif ev == 'SHOULDER_RIGHT' or ev == 'CONFIRM':
-            # select / place
-            if not selecting:
-                # pick a piece if it's player's color
-                p = board[sely][selx]
-                if p != '.' and ((turn=='white' and is_white(p)) or (turn=='black' and is_black(p))):
-                    selecting = True
-                    selected_sq = (selx, sely)
-                else:
-                    # invalid pick -> flash
-                    display.clear(); display.text("Invalid", 8, 28); display.show()
-                    time.sleep_ms(220)
-            else:
-                # try to move from selected_sq to current sel
-                mv = (selected_sq, (selx, sely))
-                # check move is legal
-                legal = legal_moves(board, turn)
-                if mv in legal:
-                    board = make_move(board, mv)
-                    selecting = False
-                    selected_sq = None
-                    # switch turn
-                    turn = 'black' if turn=='white' else 'white'
-                    # if next turn is AI, compute and apply move
-                    if (turn=='black') :
-                        # AI move
-                        if difficulty == 'Easy':
-                            moves = legal_moves(board, turn)
-                            if moves:
-                                board = make_move(board, random.choice(moves))
-                                turn = 'white'
-                        else:
-                            # use minimax depth per difficulty
-                            d = DEPTH_FOR[difficulty]
-                            # limited time; choose mov via minimax
-                            val,mv = minimax(board, d, turn, -10**9, 10**9)
-                            if mv:
-                                board = make_move(board, mv)
-                            turn = 'white'
-                else:
-                    # invalid move -> cancel selection
-                    selecting = False
-                    selected_sq = None
-        # allow player to exit to menu with long CONFIRM? We'll use CONFIRM+SHOULDER_LEFT combination
-        if ev == 'CONFIRM' and buttons.get_event() == 'SHOULDER_LEFT':
-            return
+        # If nothing happened, small sleep
+        if not dirty_tiles and hud_hint == "":
+            time.sleep_ms(20)
+            continue
 
-        time.sleep_ms(60)
+        # compute show_moves_set for selected square
+        show_moves_set = set()
+        if selecting and selected_sq:
+            sx, sy = selected_sq
+            moves = gen_piece_moves(board, sx, sy, board[sy][sx])
+            for mv in moves:
+                b2 = make_move(board, mv)
+                if not in_check(b2, turn):
+                    tx,ty = mv[1]
+                    show_moves_set.add((tx,ty))
+
+        # redraw dirty tiles (and ensure neighboring tiles that may have changed are included)
+        to_redraw = set(dirty_tiles)
+        # also ensure any tiles that changed pieces (compare snapshot) are redrawn
+        if prev_board_snapshot is None:
+            # full redraw fallback (rare)
+            for r in range(BOARD_SIZE):
+                for c in range(BOARD_SIZE):
+                    to_redraw.add((c,r))
+        else:
+            for r in range(BOARD_SIZE):
+                for c in range(BOARD_SIZE):
+                    if board[r][c] != prev_board_snapshot[r][c]:
+                        to_redraw.add((c,r))
+
+        # apply redraws
+        for (c,r) in to_redraw:
+            if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
+                redraw_tile(display, board, r, c, show_moves_set, (selx,sely) if not selecting else selected_sq, prev_sel)
+
+        # redraw HUD
+        draw_hud(display, "Chess", difficulty, turn, hud_hint)
+        display.show()
+
+        # snapshot
+        prev_board_snapshot = clone_board(board)
+        # reset prev_sel so we don't keep redrawing removed selection repeatedly
+        prev_sel = None
+
+        # small delay so button repeats aren't too fast
+        time.sleep_ms(30)
+
