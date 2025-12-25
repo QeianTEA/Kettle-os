@@ -350,7 +350,7 @@ def run(display, buttons):
         player_lat_vel = 0
         last_spawn_ms = now_ms()
         last_powerup_ms = now_ms()
-        next_powerup_ms = last_powerup_ms + _randint(5000, 8000)
+        next_powerup_ms = last_powerup_ms + _randint(3000, 5000)
         invuln_until = 0
         start_ms = now_ms()
 
@@ -415,7 +415,7 @@ def run(display, buttons):
                 if now >= next_powerup_ms:
                     spawn_powerup()
                     last_powerup_ms = now
-                    next_powerup_ms = now + _randint(5000, 8000)
+                    next_powerup_ms = now + _randint(3000, 5000)
 
                 if time.ticks_diff(now, PASSERBY_CONFIG['last_spawn_ms']) > _randint(PASSERBY_CONFIG['spawn_ms_min'], PASSERBY_CONFIG['spawn_ms_max']):
                     spawn_passerby()

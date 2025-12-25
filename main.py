@@ -11,6 +11,7 @@ from games import volfied
 from games import heatseekers
 from games import datahop
 from games import minesweeper
+from games import chess
 
 # import splash screen gif
 from modules.img_loader import play_gif_from_index
@@ -79,8 +80,9 @@ def main():
         {'name': "Snake", 'module': snake},
         {'name': "Volfied", 'module': volfied},
         {'name': "Heat Seekers", 'module': heatseekers},
-        {'name': "Mike Sweeper", 'module': minesweeper},   # to be added later
-        {'name': "Data Hop", 'module': datahop},   # to be added later
+        {'name': "Mike Sweeper", 'module': minesweeper},
+        {'name': 'Chepp', 'module': chess}
+        {'name': "Data Hop", 'module': datahop},
         {'name': "Mike", 'module': None}    # to be added later
     ]
 
