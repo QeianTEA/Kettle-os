@@ -42,16 +42,16 @@ invuln_until = 0
 start_ms = 0
 
 MISSILE_TYPES = [
-    ('standard',   2, 2, 2.5, 0.062, False, 1.0),
-    ('blinky_fast',1, 1, 4.2, 0.052, True,  0.6),
-    ('man',        1, 1, 2.5, 0.100, False, 0.6),
-    ('slowblink',  2, 2, 1.5, 0.055, True,  0.1),
+    ('standard',   2, 2, 2.5, 0.048, False, 1.0),
+    ('blinky_fast',1, 1, 4.2, 0.02, True,  0.6),
+    ('man',        1, 1, 2.5, 0.10, False, 0.6),
+    ('slowblink',  2, 2, 1.5, 0.15, True,  0.1),
 ]
 
 PASSERBY_CONFIG = {
     'spawn_ms_min': 4000,
     'spawn_ms_max': 9000,
-    'speed': 5.5,      # vertical dive speed (px/frame)
+    'speed': 4.5,
     'missile_delay': 0,
     'size': (8,3),
     'last_spawn_ms': 0
@@ -62,14 +62,14 @@ BOSS_CONFIG = {
     'start_world_y': -40.0,         # changed: spawn near top of screen (visible)
     'follow_speed': 0.9,
     'dodge_dist': 16.0,
-    'hp': 12,
+    'hp': 18,
     'rocket_speed': 6.0,
     'rocket_size': (3,3),
     'pattern_delay_ms': 1200,
     'last_pattern_ms': 0,
 }
 
-BULLET_SPEED = 8.5
+BULLET_SPEED = 6
 BULLET_SIZE = (2,2)
 bullets = []
 
@@ -199,10 +199,16 @@ def spawn_powerup():
     powerups.append({'world_x': wx_fp, 'world_y': wy_fp, 'type': ptype, 'born_ms': now_ms()})
 
 def spawn_passerby():
-    # spawn noticeably higher, so they dive into view
-    wx_fp = fp_from_float(player_world_x / FP + random.uniform(-W * 0.6, W * 0.6))
-    wy_fp = fp_from_float(-random.uniform(220.0, 120.0))  # spawn higher than before
-    vx_fp = fp_from_float(random.uniform(-0.8, 0.8))
+    # spawn in front of player (±30 px) and noticeably higher so they dive into view
+    player_px = player_world_x / FP
+    offset = random.uniform(-30.0, 30.0)
+    wx_fp = fp_from_float(player_px + offset)
+    wy_fp = fp_from_float(-random.uniform(220.0, 140.0))  # spawn higher than before
+
+    # stronger initial horizontal velocity toward player's current position (more aggressive tracking)
+    # compute delta in fixed-point and apply a larger factor so jets start heading directly at player
+    delta_fp = int(player_world_x - wx_fp)
+    vx_fp = int(delta_fp * 0.12)   # <-- change factor here to tune "closeness" at spawn (0.12 is fairly strong)
     vy_fp = fp_from_float(PASSERBY_CONFIG['speed'])
     pw, ph = PASSERBY_CONFIG['size']
     passerby.append({
@@ -211,6 +217,7 @@ def spawn_passerby():
         'born_ms': now_ms(), 'fired': False
     })
     PASSERBY_CONFIG['last_spawn_ms'] = now_ms()
+
 
 def spawn_boss():
     global boss, boss_active, shoot_until
@@ -343,7 +350,7 @@ def run(display, buttons):
         player_lat_vel = 0
         last_spawn_ms = now_ms()
         last_powerup_ms = now_ms()
-        next_powerup_ms = last_powerup_ms + _randint(15000, 30000)
+        next_powerup_ms = last_powerup_ms + _randint(5000, 8000)
         invuln_until = 0
         start_ms = now_ms()
 
@@ -363,6 +370,13 @@ def run(display, buttons):
         while True:
             now = now_ms()
             elapsed_s = (now - start_ms) / 1000.0
+            
+                        # ----- missile spawn window -----
+            # Disallow missile & passerby spawning in the final 5 seconds before boss appears.
+            # This variable is used later when deciding to spawn missiles / passerby and when
+            # passerby decide to drop their missile.
+            missiles_allowed = (elapsed_s < (BOSS_CONFIG['appear_after_s'] - 5.0)) and (not boss_active)
+
 
             # spawn boss when time reached
             if (not boss_active) and elapsed_s >= BOSS_CONFIG['appear_after_s']:
@@ -401,7 +415,7 @@ def run(display, buttons):
                 if now >= next_powerup_ms:
                     spawn_powerup()
                     last_powerup_ms = now
-                    next_powerup_ms = now + _randint(15000, 30000)
+                    next_powerup_ms = now + _randint(5000, 8000)
 
                 if time.ticks_diff(now, PASSERBY_CONFIG['last_spawn_ms']) > _randint(PASSERBY_CONFIG['spawn_ms_min'], PASSERBY_CONFIG['spawn_ms_max']):
                     spawn_passerby()
@@ -428,25 +442,49 @@ def run(display, buttons):
                 for m in to_remove:
                     if m in missiles: missiles.remove(m)
 
-                # update passerby: dive downward (vy) and drop missile earlier (higher threshold)
+                # update passerby: dive downward (vy); apply light homing so they follow player closely
                 for p in list(passerby):
+                    # homing: compute desired vx toward player and gently approach it
+                    # homing_strength: how aggressively they adjust toward player's x (fixed-point multiplier)
+                    homing_strength = 0.5   # tune this: larger -> tighter following (0.06 good for "very close")
+                    max_delta_per_frame_px = 1.5  # in pixels: max change in vx per frame (keeps jet feel)
+                    # compute desired vx in fixed-point
+                    desired_vx_fp = int((player_world_x - p['world_x']) * homing_strength)
+                    # compute max delta in fixed-point
+                    max_delta_fp = fp_from_float(max_delta_per_frame_px)
+                    # clamp change so they can't instantly teleport their vx
+                    dv = clamp(desired_vx_fp - p['vx'], -max_delta_fp, max_delta_fp)
+                    p['vx'] += dv
+
+                    # apply motion
                     p['world_x'] += int(p['vx'])
                     p['world_y'] += int(p['vy'])
+
                     p_sy = world_to_screen_y(int(p['world_y']))
-                    # drop earlier: threshold moved up
-                    if (not p['fired']) and p_sy >= PY - 50:
+                    # drop missile earlier: threshold moved up, and only if missiles_allowed
+                    if missiles_allowed and (not p['fired']) and p_sy >= PY - 50:
                         mx_fp = int(p['world_x'])
                         my_fp = int(p['world_y']) + fp_from_float(4.0)
                         target_x_fp = int(player_world_x)
+                        # compute horizontal velocity in fixed-point so missile aims toward player's X
+                        dx_fp = (target_x_fp - mx_fp)   # fixed-point delta
+                        # approximate frames-to-impact (t). Larger t -> gentler horizontal velocity.
+                        # Tune this: 60 = gentle lead, 30 = stronger lead, float division used then cast to int
+                        t_frames = 20.0
+                        vx_fp = int(dx_fp / t_frames)
                         missiles.append({
                             'type': 'p_missile', 'world_x': mx_fp, 'world_y': my_fp,
-                            'vx': int((target_x_fp - mx_fp) * 0.02), 'vy': fp_from_float(3.8),
+                            'vx': vx_fp, 'vy': fp_from_float(3.8),
                             'pw': 2, 'ph': 2, 'maneuver': 0.02, 'blink': False,
                             'born_ms': now, 'owner': 'passerby'
                         })
+
                         p['fired'] = True
-                    if abs(p['world_x'] - player_world_x) > fp_from_float(W * 2.0):
+
+                    # remove only after they pass far below play area (so they pass near player)
+                    if world_to_screen_y(int(p['world_y'])) > H + 40:
                         if p in passerby: passerby.remove(p)
+
 
                 # update boss
                 if boss_active and boss:
@@ -618,7 +656,7 @@ def run(display, buttons):
                 display.clear()
                 display.text("CRASHED", 28, 12)
                 display.text("T:%03d s" % (total_s), 40, 28)
-                display.text("Press L to restart", 4, 46)
+                display.text("L and R for res", 4, 46)
                 display.show()
                 while True:
                     ev_local = None
@@ -626,7 +664,7 @@ def run(display, buttons):
                         ev_local = 'RESTART'
                     else:
                         ev_local = buttons.get_event()
-                    if ev_local == 'RESTART' or ev_local == 'SHOULDER_L':
+                    if ev_local == 'RESTART' or (ev_local == 'SHOULDER_L' and ev_local == 'SHOULDER_R'):
                         skip_splash = True
                         break
                     if ev_local == 'CONFIRM':
@@ -656,9 +694,14 @@ def run(display, buttons):
                 sy = world_to_screen_y(int(p['world_y']))
                 if -20 <= sy <= H + 20:
                     try:
-                        display.fill_rect(int(sx), int(sy), 1, 1, 1)
-                        display.fill_rect(int(sx)-1, int(sy)+1, 3, 1, 1)
-                        display.fill_rect(int(sx)-2, int(sy)+2, 5, 1, 1)
+                        # top middle
+                        display.fill_rect(int(sx) + 1, int(sy) + 0, 1, 1, 1)
+                        # middle row
+                        display.fill_rect(int(sx) + 0, int(sy) + 1, 1, 1, 1)
+                        display.fill_rect(int(sx) + 1, int(sy) + 1, 1, 1, 1)
+                        display.fill_rect(int(sx) + 2, int(sy) + 1, 1, 1, 1)
+                        # bottom middle
+                        display.fill_rect(int(sx) + 1, int(sy) + 2, 1, 1, 1)
                     except TypeError:
                         display.fill_rect(int(sx), int(sy), 1, 1)
                         display.fill_rect(int(sx)-1, int(sy)+1, 3, 1)
@@ -740,5 +783,7 @@ def run(display, buttons):
             time.sleep_ms(28)
 
         # outer session continues; if skip_splash True next session starts immediately
+
+
 
 
