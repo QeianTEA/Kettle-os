@@ -1,8 +1,9 @@
 # games/heatseekers/heatseekers.py
 # HeatSeekers - Pico (128x64)
-# Extended/fixed: miniboss, passerby jets (dive), bullets, powerup storage/use, restart on L_shoulder
-# Performance: fixed-point math kept; death handling/sync fixed; passerby modified to dive.
-# Adjustments: boss spawn at 45s & visible; missiles/passerby spawn higher; reliable missile-vs-missile explosions.
+# Updated: boss-only shooting, remove 'shoot' pickups, display boss HP meter,
+#         delete stored powerup on boss spawn, ensure full reset on restart.
+#         Confirm is the power HOLD button; maneuver drains on move press/hold.
+#         No new missiles/passerby spawn during boss fight.
 
 import time
 import random
@@ -58,8 +59,8 @@ PASSERBY_CONFIG = {
 }
 
 BOSS_CONFIG = {
-    'appear_after_s': 45.0,         # changed: spawn earlier at 45s
-    'start_world_y': -40.0,         # changed: spawn near top of screen (visible)
+    'appear_after_s': 45.0,
+    'start_world_y': -40.0,
     'follow_speed': 0.9,
     'dodge_dist': 16.0,
     'hp': 18,
@@ -80,14 +81,26 @@ passerby = []
 boss = None
 boss_active = False
 
+# stored_powerup: None or dict {'type': str, 'charge': float}
 stored_powerup = None
+
+# legacy timers still present but no longer used as primary mechanic
 shoot_until = 0
 maneuver_until = 0
 
+# Pin mapping (user-specified)
 PIN_LEFT = 8
 PIN_RIGHT = 9
 PIN_SH_L = 11
 PIN_SH_R = 12
+PIN_CONFIRM = 10   # << Confirm button is GP10 (hold used for invuln)
+
+# Power drain rates (% per second)
+DRAIN_RATES = {
+    'invuln': 40.0,   # 40% per second when held (confirm)
+    'maneuver': 20.0, # 20% per second when holding move (left/right)
+}
+# NOTE: 'shoot' removed from spawn and charge system — bullets now only available during boss.
 
 # ---------- helpers ----------
 def now_ms():
@@ -193,22 +206,19 @@ def spawn_missile(elapsed_s):
     })
 
 def spawn_powerup():
-    ptype = random.choice(['shoot', 'maneuver', 'invuln'])
+    # NOTE: 'shoot' removed so player cannot acquire bullets via pickups
+    ptype = random.choice(['maneuver', 'invuln'])
     wx_fp = fp_from_float(player_world_x / FP + random.uniform(-W * 0.5, W * 0.5))
     wy_fp = fp_from_float(-random.uniform(60.0, 140.0))
     powerups.append({'world_x': wx_fp, 'world_y': wy_fp, 'type': ptype, 'born_ms': now_ms()})
 
 def spawn_passerby():
-    # spawn in front of player (±30 px) and noticeably higher so they dive into view
     player_px = player_world_x / FP
     offset = random.uniform(-30.0, 30.0)
     wx_fp = fp_from_float(player_px + offset)
     wy_fp = fp_from_float(-random.uniform(220.0, 140.0))  # spawn higher than before
-
-    # stronger initial horizontal velocity toward player's current position (more aggressive tracking)
-    # compute delta in fixed-point and apply a larger factor so jets start heading directly at player
     delta_fp = int(player_world_x - wx_fp)
-    vx_fp = int(delta_fp * 0.12)   # <-- change factor here to tune "closeness" at spawn (0.12 is fairly strong)
+    vx_fp = int(delta_fp * 0.12)
     vy_fp = fp_from_float(PASSERBY_CONFIG['speed'])
     pw, ph = PASSERBY_CONFIG['size']
     passerby.append({
@@ -218,9 +228,10 @@ def spawn_passerby():
     })
     PASSERBY_CONFIG['last_spawn_ms'] = now_ms()
 
-
 def spawn_boss():
-    global boss, boss_active, shoot_until
+    global boss, boss_active, shoot_until, stored_powerup, last_spawn_ms
+    # delete stored powerup on boss spawn
+    stored_powerup = None
     boss = {
         'world_x': fp_from_float(player_world_x / FP),
         'world_y': fp_from_float(BOSS_CONFIG['start_world_y']),
@@ -229,6 +240,9 @@ def spawn_boss():
         'born_ms': now_ms(), 'last_dodge_ms': 0
     }
     boss_active = True
+    # nudge spawn timers so no immediate missile spawns
+    last_spawn_ms = now_ms()
+    PASSERBY_CONFIG['last_spawn_ms'] = now_ms()
     shoot_until = now_ms() + 10000
     BOSS_CONFIG['last_pattern_ms'] = now_ms()
 
@@ -313,6 +327,7 @@ def draw_powerup_icon(display, ptype):
         display.rect(sx, sy, 8, 8)
         return
     if ptype == 'shoot':
+        # should never occur (we don't spawn 'shoot' anymore) but keep fallback
         display.fill_rect(sx + 1, sy + 3, 5, 2, 1)
         display.fill_rect(sx + 6, sy + 2, 2, 2, 1)
     elif ptype == 'maneuver':
@@ -337,6 +352,7 @@ def run(display, buttons):
     pin_right = Pin(PIN_RIGHT, Pin.IN, Pin.PULL_UP)
     pin_sh_l = Pin(PIN_SH_L, Pin.IN, Pin.PULL_UP)
     pin_sh_r = Pin(PIN_SH_R, Pin.IN, Pin.PULL_UP)
+    pin_confirm = Pin(PIN_CONFIRM, Pin.IN, Pin.PULL_UP)   # used for hold (invuln drain)
 
     # session loop
     skip_splash = False
@@ -345,6 +361,7 @@ def run(display, buttons):
             _show_splash_image_or_text(display, buttons)
         skip_splash = False
 
+        # full reset at session start
         missiles.clear(); powerups.clear(); explosions.clear(); passerby.clear(); bullets.clear()
         player_world_x = fp_from_float(0.0)
         player_lat_vel = 0
@@ -367,16 +384,18 @@ def run(display, buttons):
         boss_active = False
         PASSERBY_CONFIG['last_spawn_ms'] = now_ms()
 
+        last_tick = now_ms()
+
         while True:
             now = now_ms()
             elapsed_s = (now - start_ms) / 1000.0
-            
-                        # ----- missile spawn window -----
-            # Disallow missile & passerby spawning in the final 5 seconds before boss appears.
-            # This variable is used later when deciding to spawn missiles / passerby and when
-            # passerby decide to drop their missile.
-            missiles_allowed = (elapsed_s < (BOSS_CONFIG['appear_after_s'] - 5.0)) and (not boss_active)
+            dt = (now - last_tick) / 1000.0
+            if dt <= 0:
+                dt = 0.001
+            last_tick = now
 
+            # ----- missile spawn window -----
+            missiles_allowed = (elapsed_s < (BOSS_CONFIG['appear_after_s'] - 5.0)) and (not boss_active)
 
             # spawn boss when time reached
             if (not boss_active) and elapsed_s >= BOSS_CONFIG['appear_after_s']:
@@ -385,12 +404,49 @@ def run(display, buttons):
             if exploding:
                 pass
             else:
+                # read move states (active-low)
                 steering_left = (pin_left.value() == 0) or (pin_sh_l.value() == 0)
                 steering_right = (pin_right.value() == 0) or (pin_sh_r.value() == 0)
+                move_pressed = steering_left or steering_right
 
-                accel_mult = 2 if now < maneuver_until else 1
+                # ------- POWERUP HOLD USAGE -------
+                # power_hold is now Confirm (GP10) active-low
+                power_hold = (pin_confirm.value() == 0)
+
+                invuln_active = False
+                maneuver_active = False
+
+                # drain / apply stored powerups:
+                # - invuln drains while CONFIRM is held
+                # - maneuver drains while a move button (L/R) is held
+                if stored_powerup is not None:
+                    ptype = stored_powerup.get('type')
+                    if ptype == 'invuln' and power_hold:
+                        rate = DRAIN_RATES.get('invuln', 0.0)
+                        stored_powerup['charge'] -= rate * dt
+                        if stored_powerup['charge'] <= 0:
+                            stored_powerup = None
+                        else:
+                            invuln_active = True
+                    elif ptype == 'maneuver' and move_pressed:
+                        # using maneuver by pressing/holding move
+                        rate = DRAIN_RATES.get('maneuver', 0.0)
+                        stored_powerup['charge'] -= rate * dt
+                        if stored_powerup['charge'] <= 0:
+                            stored_powerup = None
+                        else:
+                            maneuver_active = True
+
+                # Also honor legacy timers if set elsewhere
+                if now < maneuver_until:
+                    maneuver_active = True
+                if now < invuln_until:
+                    invuln_active = True
+
+                # movement
+                accel_mult = 2 if maneuver_active else 1
                 lat_accel_fp = LAT_ACCEL * accel_mult
-                lat_max_fp = int(LAT_MAX * (1.4 if now < maneuver_until else 1.0))
+                lat_max_fp = int(LAT_MAX * (1.4 if maneuver_active else 1.0))
 
                 if steering_left and not steering_right:
                     player_lat_vel -= lat_accel_fp
@@ -407,17 +463,20 @@ def run(display, buttons):
                 max_world_fp = fp_from_float(W * 2.0)
                 player_world_x = clamp(player_world_x, -max_world_fp, max_world_fp)
 
+                # spawn missiles only if not in boss fight
                 si = spawn_interval_ms(elapsed_s)
-                if time.ticks_diff(now, last_spawn_ms) >= si:
+                if (not boss_active) and time.ticks_diff(now, last_spawn_ms) >= si:
                     spawn_missile(elapsed_s)
                     last_spawn_ms = now
 
-                if now >= next_powerup_ms:
+                # spawn powerups (allowed before boss)
+                if not boss_active and now >= next_powerup_ms:
                     spawn_powerup()
                     last_powerup_ms = now
                     next_powerup_ms = now + _randint(3000, 5000)
 
-                if time.ticks_diff(now, PASSERBY_CONFIG['last_spawn_ms']) > _randint(PASSERBY_CONFIG['spawn_ms_min'], PASSERBY_CONFIG['spawn_ms_max']):
+                # spawn passerby only if not in boss fight
+                if (not boss_active) and time.ticks_diff(now, PASSERBY_CONFIG['last_spawn_ms']) > _randint(PASSERBY_CONFIG['spawn_ms_min'], PASSERBY_CONFIG['spawn_ms_max']):
                     spawn_passerby()
 
                 # update missiles (fixed-point)
@@ -444,47 +503,34 @@ def run(display, buttons):
 
                 # update passerby: dive downward (vy); apply light homing so they follow player closely
                 for p in list(passerby):
-                    # homing: compute desired vx toward player and gently approach it
-                    # homing_strength: how aggressively they adjust toward player's x (fixed-point multiplier)
-                    homing_strength = 0.5   # tune this: larger -> tighter following (0.06 good for "very close")
-                    max_delta_per_frame_px = 1.5  # in pixels: max change in vx per frame (keeps jet feel)
-                    # compute desired vx in fixed-point
+                    homing_strength = 0.5
+                    max_delta_per_frame_px = 1.5
                     desired_vx_fp = int((player_world_x - p['world_x']) * homing_strength)
-                    # compute max delta in fixed-point
                     max_delta_fp = fp_from_float(max_delta_per_frame_px)
-                    # clamp change so they can't instantly teleport their vx
                     dv = clamp(desired_vx_fp - p['vx'], -max_delta_fp, max_delta_fp)
                     p['vx'] += dv
 
-                    # apply motion
                     p['world_x'] += int(p['vx'])
                     p['world_y'] += int(p['vy'])
 
                     p_sy = world_to_screen_y(int(p['world_y']))
-                    # drop missile earlier: threshold moved up, and only if missiles_allowed
+                    # passerby missiles only drop when missiles_allowed (and passerby spawn only if not boss)
                     if missiles_allowed and (not p['fired']) and p_sy >= PY - 50:
                         mx_fp = int(p['world_x'])
                         my_fp = int(p['world_y']) + fp_from_float(4.0)
                         target_x_fp = int(player_world_x)
-                        # compute horizontal velocity in fixed-point so missile aims toward player's X
-                        dx_fp = (target_x_fp - mx_fp)   # fixed-point delta
-                        # approximate frames-to-impact (t). Larger t -> gentler horizontal velocity.
-                        # Tune this: 60 = gentle lead, 30 = stronger lead, float division used then cast to int
                         t_frames = 20.0
+                        dx_fp = (target_x_fp - mx_fp)
                         vx_fp = int(dx_fp / t_frames)
                         missiles.append({
                             'type': 'p_missile', 'world_x': mx_fp, 'world_y': my_fp,
                             'vx': vx_fp, 'vy': fp_from_float(3.8),
-                            'pw': 2, 'ph': 2, 'maneuver': 0.02, 'blink': False,
-                            'born_ms': now, 'owner': 'passerby'
+                            'pw': 2, 'ph': 2, 'maneuver': 0.02, 'blink': False, 'born_ms': now, 'owner': 'passerby'
                         })
-
                         p['fired'] = True
 
-                    # remove only after they pass far below play area (so they pass near player)
                     if world_to_screen_y(int(p['world_y'])) > H + 40:
                         if p in passerby: passerby.remove(p)
-
 
                 # update boss
                 if boss_active and boss:
@@ -492,6 +538,7 @@ def run(display, buttons):
                     boss['vx'] = int(dx_fp * 0.02 * BOSS_CONFIG['follow_speed'])
                     boss['world_x'] += boss['vx']
                     boss['world_y'] = fp_from_float(BOSS_CONFIG['start_world_y'] + math.sin((now - boss['born_ms'])/400.0) * 4.0)
+                    # boss dodges bullets (bullets list used only during boss fight)
                     for b in list(bullets):
                         if abs(b['world_x'] - boss['world_x']) < fp_from_float(BOSS_CONFIG['dodge_dist']):
                             dodge = -int(math.copysign(fp_from_float(8.0), (b['world_x'] - boss['world_x'])))
@@ -521,41 +568,20 @@ def run(display, buttons):
                                     'pw': 2, 'ph': 2, 'maneuver': 0.0, 'blink': False, 'born_ms': now, 'owner': 'boss'
                                 })
 
-                # bullets update
+                # bullets update (bullets exist only during boss fight now)
                 for b in list(bullets):
                     b['world_y'] -= fp_from_float(b['vy'])
                     if world_to_screen_y(int(b['world_y'])) < -48:
                         if b in bullets: bullets.remove(b)
 
-                # bullets collisions (missiles/passerby/boss)
-                for b in list(bullets):
-                    bx_px = world_to_screen_x(int(b['world_x']), player_world_x)
-                    by_px = world_to_screen_y(int(b['world_y']))
-                    removed_b = False
-                    for m in list(missiles):
-                        mx_px = world_to_screen_x(int(m['world_x']), player_world_x)
-                        my_px = world_to_screen_y(int(m['world_y']))
-                        if rects_overlap(bx_px, by_px, b['pw'], b['ph'], mx_px, my_px, m['pw'], m['ph']):
-                            if m in missiles: missiles.remove(m)
-                            if b in bullets: bullets.remove(b)
-                            removed_b = True
-                            # explosion at missile world coords
-                            create_explosion_at_world(int(m['world_x']), int(m['world_y']), now, size=5, vy=None)
-                            break
-                    if removed_b: continue
-                    for p in list(passerby):
-                        px_px = world_to_screen_x(int(p['world_x']), player_world_x)
-                        py_px = world_to_screen_y(int(p['world_y']))
-                        if rects_overlap(bx_px, by_px, b['pw'], b['ph'], px_px, py_px, p['pw'], p['ph']):
-                            if p in passerby: passerby.remove(p)
-                            if b in bullets: bullets.remove(b)
-                            removed_b = True
-                            create_explosion_at_world(int(p['world_x']), int(p['world_y']), now, size=6, vy=None)
-                            break
-                    if removed_b: continue
-                    if boss_active and boss:
+                # bullets collisions: only collide with boss (NOT missiles/passerby)
+                if boss_active and boss:
+                    for b in list(bullets):
+                        bx_px = world_to_screen_x(int(b['world_x']), player_world_x)
+                        by_px = world_to_screen_y(int(b['world_y']))
                         bx_center = world_to_screen_x(int(boss['world_x']), player_world_x)
                         by_center = world_to_screen_y(int(boss['world_y']))
+                        # boss bounds same as rendering: centered 18x12
                         if rects_overlap(bx_px, by_px, b['pw'], b['ph'], bx_center-9, by_center-6, 18, 12):
                             boss['hp'] -= 1
                             if b in bullets: bullets.remove(b)
@@ -568,7 +594,7 @@ def run(display, buttons):
                                 skip_splash = False
                                 break
 
-                # missile vs missile collisions (now use world coords to place explosion reliably)
+                # missile vs missile collisions
                 msnap = list(missiles)
                 for i, a in enumerate(msnap):
                     if a not in missiles: continue
@@ -576,19 +602,16 @@ def run(display, buttons):
                         if b2 not in missiles: continue
                         ax_fp = int(a['world_x']); ay_fp = int(a['world_y'])
                         bx_fp = int(b2['world_x']); by_fp = int(b2['world_y'])
-                        # compute screen pixels for overlap check (same as before)
                         ax_px = world_to_screen_x(ax_fp, player_world_x); ay_px = world_to_screen_y(ay_fp)
                         bx_px = world_to_screen_x(bx_fp, player_world_x); by_px = world_to_screen_y(by_fp)
                         if rects_overlap(ax_px, ay_px, a['pw'], a['ph'], bx_px, by_px, b2['pw'], b2['ph']):
-                            # center in world fixed-point (integer)
                             center_wx = (ax_fp + bx_fp) // 2
                             center_wy = (ay_fp + by_fp) // 2
-                            # create explosion at world center (guaranteed correct position)
                             create_explosion_at_world(center_wx, center_wy, now, size=5, vy=None)
                             if a in missiles: missiles.remove(a)
                             if b2 in missiles: missiles.remove(b2)
 
-                # update powerups
+                # update powerups (falling)
                 pu_remove = []
                 for pu in list(powerups):
                     pu['world_y'] += fp_from_float(1.2)
@@ -596,14 +619,16 @@ def run(display, buttons):
                     sy = world_to_screen_y(int(pu['world_y']))
                     plx, ply, pw, ph = plane_rect()
                     if rects_overlap(sx, sy, 4, 4, plx, ply, pw, ph):
-                        stored_powerup = pu['type']
+                        # pickup: set charge to 100% and keep the stored powerup until depleted/replaced
+                        # only maneuver/invuln are possible now
+                        stored_powerup = {'type': pu['type'], 'charge': 100.0}
                         pu_remove.append(pu)
                     if sy > H + 32: pu_remove.append(pu)
                 for pu in pu_remove:
                     if pu in powerups: powerups.remove(pu)
 
-                # missile vs player collisions
-                invuln = (now < invuln_until)
+                # missile vs player collisions (respect invuln_active)
+                invuln = invuln_active
                 if not invuln:
                     plx, ply, pw, ph = plane_rect()
                     hit = False; hit_missile = None
@@ -637,7 +662,7 @@ def run(display, buttons):
                         for m in rm:
                             if m in missiles: missiles.remove(m)
 
-            # If we just entered exploding state, handle death sequence now (freeze simulation and show crash after timer)
+            # If we just entered exploding state, handle death sequence now
             if exploding:
                 while now_ms() < explosion_end_ms:
                     display.clear()
@@ -688,19 +713,16 @@ def run(display, buttons):
                 else:
                     display.fill_rect(int(sx), int(sy), w_px, h_px, 1)
 
-            # passerby draw as downward triangle (long triangle)
+            # passerby draw
             for p in list(passerby):
                 sx = world_to_screen_x(int(p['world_x']), player_world_x)
                 sy = world_to_screen_y(int(p['world_y']))
                 if -20 <= sy <= H + 20:
                     try:
-                        # top middle
                         display.fill_rect(int(sx) + 1, int(sy) + 0, 1, 1, 1)
-                        # middle row
                         display.fill_rect(int(sx) + 0, int(sy) + 1, 1, 1, 1)
                         display.fill_rect(int(sx) + 1, int(sy) + 1, 1, 1, 1)
                         display.fill_rect(int(sx) + 2, int(sy) + 1, 1, 1, 1)
-                        # bottom middle
                         display.fill_rect(int(sx) + 1, int(sy) + 2, 1, 1, 1)
                     except TypeError:
                         display.fill_rect(int(sx), int(sy), 1, 1)
@@ -745,7 +767,7 @@ def run(display, buttons):
 
             # player
             if not exploding:
-                invuln = (now < invuln_until)
+                invuln = invuln_active
                 draw_plane(display, angle, invuln)
 
             # HUD: hide timer when boss is active
@@ -756,34 +778,84 @@ def run(display, buttons):
             if not boss_active:
                 elapsed_display = int(elapsed_s)
                 display.text("T:%03d" % (elapsed_display), 0, 0)
-            if now < invuln_until:
+            if invuln_active:
                 display.text("I", 56, 0)
 
-            draw_powerup_icon(display, stored_powerup)
+            # stored powerup icon bottom-left
+            draw_powerup_icon(display, stored_powerup['type'] if stored_powerup is not None else None)
+
+            # ---- RIGHT-SIDE 1px METER & PERCENTAGE ----
+            # - If boss is active: show boss HP %
+            # - Else if stored_powerup exists: show its charge
+            if boss_active and boss:
+                boss_hp = max(0, boss.get('hp', 0))
+                boss_max = max(1, BOSS_CONFIG.get('hp', 1))
+                percent = int((boss_hp * 100) / boss_max)
+                # vertical meter at x = W-1 for boss HP
+                try:
+                    display.fill_rect(W-1, 0, 1, H, 0)
+                except TypeError:
+                    for yy in range(H):
+                        display.fill_rect(W-1, yy, 1, 1)
+                fill_h = int((percent / 100.0) * H)
+                fill_y = H - fill_h
+                try:
+                    display.fill_rect(W-1, fill_y, 1, fill_h, 1)
+                except TypeError:
+                    for yy in range(fill_y, H):
+                        display.fill_rect(W-1, yy, 1, 1)
+                try:
+                    display.fill_rect(W-28, 0, 28, 8, 0)
+                except TypeError:
+                    try:
+                        display.fill_rect(W-28, 0, 28, 8)
+                    except Exception:
+                        pass
+                display.text("%d%%" % percent, W-24, 0)
+
+            elif stored_powerup is not None:
+                charge = max(0.0, min(100.0, stored_powerup.get('charge', 0.0)))
+                try:
+                    display.fill_rect(W-1, 0, 1, H, 0)
+                except TypeError:
+                    for yy in range(H):
+                        display.fill_rect(W-1, yy, 1, 1)
+                fill_h = int((charge / 100.0) * H)
+                fill_y = H - fill_h
+                try:
+                    display.fill_rect(W-1, fill_y, 1, fill_h, 1)
+                except TypeError:
+                    for yy in range(fill_y, H):
+                        display.fill_rect(W-1, yy, 1, 1)
+                try:
+                    display.fill_rect(W-28, 0, 28, 8, 0)
+                except TypeError:
+                    try:
+                        display.fill_rect(W-28, 0, 28, 8)
+                    except Exception:
+                        pass
+                display.text("%d%%" % int(charge), W-24, 0)
 
             display.show()
 
-            # CONFIRM usage
+            # ---- INPUT: CONFIRM behaviour ----
             ev = buttons.get_event()
             if ev == 'CONFIRM' and not exploding:
-                if now < shoot_until:
+                # If boss is active -> firing enabled (infinite bullets)
+                if boss_active and boss:
                     bullets.append({
-                        'world_x': int(player_world_x), 'world_y': fp_from_float(-2.0), 'pw': BULLET_SIZE[0], 'ph': BULLET_SIZE[1], 'vy': BULLET_SPEED
+                        'world_x': int(player_world_x),
+                        'world_y': fp_from_float(-2.0),
+                        'pw': BULLET_SIZE[0],
+                        'ph': BULLET_SIZE[1],
+                        'vy': BULLET_SPEED,
+                        'owner': 'player'
                     })
                 else:
-                    if stored_powerup is not None:
-                        if stored_powerup == 'shoot':
-                            shoot_until = now + _randint(5000, 10000)
-                        elif stored_powerup == 'maneuver':
-                            maneuver_until = now + _randint(5000, 10000)
-                        elif stored_powerup == 'invuln':
-                            invuln_until = now + _randint(3000, 8000)
-                        stored_powerup = None
+                    # non-boss: CONFIRM no longer instantly consumes powerups
+                    # (invuln drains while holding CONFIRM; maneuver drains while holding move)
+                    pass
 
             time.sleep_ms(28)
 
         # outer session continues; if skip_splash True next session starts immediately
-
-
-
-
