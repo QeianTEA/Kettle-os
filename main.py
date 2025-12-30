@@ -12,6 +12,7 @@ from games import heatseekers
 from games import datahop
 from games import minesweeper
 from games import chess
+from games import tetris
 
 # import splash screen gif
 from modules.img_loader import play_gif_from_index
@@ -81,6 +82,7 @@ def main():
         {'name': "Volfied", 'module': volfied},
         {'name': "Heat Seekers", 'module': heatseekers},
         {'name': "Mike Sweeper", 'module': minesweeper},
+        {'name': "Tetris", 'module': tetris},
         {'name': 'Chepp', 'module': chess},
         {'name': "Data Hop", 'module': datahop},
         {'name': "Mike", 'module': None}    # to be added later
@@ -139,3 +141,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
