@@ -230,7 +230,7 @@ def run(display, buttons):
             elif can_place(new_shape, piece_col, piece_row + 1):
                 piece_row += 1
                 curr_shape = new_shape
-        elif ev == 'SHOULDER_R':  # hard drop (advance until can't)
+        elif ev == 'SHOULDER_L':  # hard drop (advance until can't)
             dist = 0
             while can_place(curr_shape, piece_col + 1, piece_row):
                 piece_col += 1
@@ -240,7 +240,7 @@ def run(display, buttons):
             clear_full_columns()
             if not spawn_new():
                 break
-        elif ev == 'SHOULDER_L':
+        elif ev == 'SHOULDER_R':
             return
         else:
             soft_drop_active = False

@@ -13,6 +13,7 @@ from games import datahop
 from games import minesweeper
 from games import chess
 from games import tetris
+from games import kettlepaint
 
 # import splash screen gif
 from modules.img_loader import play_gif_from_index
@@ -85,7 +86,8 @@ def main():
         {'name': "Tetris", 'module': tetris},
         {'name': 'Chepp', 'module': chess},
         {'name': "Data Hop", 'module': datahop},
-        {'name': "Mike", 'module': None}    # to be added later
+        {'name': "Mike", 'module': None},    # to be added later
+        {'name': "Kettle Paint", 'module': kettlepaint}        
     ]
 
     splash(display)
@@ -141,4 +143,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 

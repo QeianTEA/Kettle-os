@@ -685,7 +685,7 @@ def run(display, buttons):
                 display.show()
                 while True:
                     ev_local = None
-                    if pin_sh_l.value() == 0:
+                    if pin_sh_l.value() == 0 and pin_sh_r.value() == 0:
                         ev_local = 'RESTART'
                     else:
                         ev_local = buttons.get_event()
