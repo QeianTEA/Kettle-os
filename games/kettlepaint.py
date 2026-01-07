@@ -28,7 +28,7 @@ RESOLUTIONS = [(128, 64), (64, 32), (32, 16)]
 GALLERY_FILENAME_SHOW_MS = 2000    # now 2 seconds per new requirement
 SAVE_HOLD_MS = 3000
 SAVE_FEEDBACK_MS = 1000            # show "SAVED" screen for 1 second
-CURSOR_BLINK_MS = 1000             # blink at 1s intervals as requested
+CURSOR_BLINK_MS = 200             # blink at 1s intervals as requested
 
 # ----------------- HELPERS -----------------
 
